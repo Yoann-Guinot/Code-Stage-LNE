@@ -1,0 +1,880 @@
+**Configuration**
+
+```{r message=FALSE}
+library(cmdstanr)
+library(plotly)
+library(bayesplot)
+
+set.seed(23)
+```
+
+# I. Mélanges gazeux
+
+**Correspondance**
+
+| **Notation (Document)** | **Signification** | **Variable (Code)** |
+|----|----|----|
+| *r* | Observation bruitée de la variable explicative | `x` |
+| *ρ* | Valeur latente de la variable explicative | `xi` |
+| *x* | Observation bruitée de la variable réponse | `y` |
+| *ξ* | Valeur latente de la variable réponse | `eta` |
+
+## 0. Modèle
+
+**Variables observées :**
+
+-   ( $y$ ): fractions molaires mesurées\
+-   ( $u_y$ ): incertitude-type associée à ( $y$ )\
+-   ( $x$ ): ratios isotopiques mesurés\
+-   ( $u_x$ ): incertitudes-types associées à ( $x$ )
+
+**Variables latentes et paramètres :**
+
+-   ( $\xi$ ): Valeur vraie du ratio\
+-   ( $\tau_y$ ): dark uncertainty affectant ( $y$ )\
+-   ( $\eta$ ): Valeur attendue de ( $y$ ) issue de la régression
+
+**Structure du modèle :**
+
+$$
+\begin{aligned}
+\xi &\sim \mathcal{N}(\xi_M,\ \xi_S^2) \\
+x &\sim \mathcal{N}(\xi,\ u_x^2) \\
+\eta &= \beta_1 + \beta_2 \xi \\
+y &\sim \mathcal{N}(\eta,\ u_y^2 + \tau_y^2)
+\end{aligned}
+$$
+
+**Distributions a priori :**
+
+$$
+\begin{aligned}
+\beta &\sim \mathcal{N}(\beta_M,\ \beta_S^2) \\
+\tau_y &\sim \text{Half-Cauchy}(0,\ \gamma_y)
+\end{aligned}
+$$
+
+## 1. Données
+
+```{r Table 1}
+# Laboratoires : NMIJ, NPL, BAM, NMIA, NIST, NMISA, CENAM, LNE, KRISS,
+#                VNIIM, VSL
+y = c(98.675, 99.002, 99.170, 100.100, 100.410, 100.585, 100.970,
+      101.040,
+      101.053, 101.080, 101.150)
+uy = c(0.009, 0.048, 0.125, 0.070, 0.060, 0.011, 0.150, 0.050, 0.010,
+       0.070, 0.040)
+
+x = c(0.983020, 0.986981, 0.986377, 1.000875, 0.998881, 1.005079,
+      1.006298, 1.004614, 1.006739, 1.009951, 1.007570) 
+ux = c(0.0006, 0.0006, 0.0006, 0.0006, 0.0006, 0.0006, 0.0006, 0.0006,
+       0.0006, 0.0006, 0.0006)
+```
+
+## 2. Paramètres
+
+```{r}
+# A priori estimé pour beta  par les Moindres Carrés Ordinaires
+psi = lm(y ~ x)
+psi.summary = summary(psi)
+beta.pi.mean = psi.summary$coefficients[, "Estimate"]
+beta.pi.cv = c(max(0.1, abs(psi.summary$coefficients[1, "Std. Error"] 
+                            / psi.summary$coefficients[1, "Estimate"])),
+               max(0.1, abs(psi.summary$coefficients[2, "Std. Error"] 
+                            / psi.summary$coefficients[2, "Estimate"]))) 
+# coefficient de variation limité à 0,1
+
+beta.pi.sd = abs(c(beta.pi.mean*beta.pi.cv))
+beta.pi.mean[1] = 0
+
+data = list(n = length(y), y = y, uy = uy, x = x, ux = ux,
+            betaM = beta.pi.mean, betaS = beta.pi.sd, xiM = x,
+            xiS = 3*ux, gammay = median(uy))
+
+# ----- ↓ light uncertainty -----
+
+Light_data = list(n = length(y), y = y, uy = uy, x = x, ux = ux,
+                  betaM = beta.pi.mean, betaS = beta.pi.sd, xiM = x,
+                  xiS = 3*ux)
+```
+
+## 3. Ajustement du modèle
+
+```{r A2}
+# cmdstanr
+# bayesplot
+
+# ↓ mis en commentaire car les échantillons ont déjà été sauvegardés
+
+# Model = cmdstan_model("Model.stan")
+# fit = Model$sample(data = data, adapt_delta = 0.985,
+#                    max_treedepth = 12, ter_warmup = 5000,
+#                    iter_sampling = 25000, chains = 4,
+#                    parallel_chains = 4, seed = 30, refresh = 3000)
+# fit$save_object("fit.rds")
+
+fit = readRDS("fit.rds")
+
+# Diagnostics MCMC
+summary_df = as.data.frame(fit$summary())
+format(summary_df, digits = 3)
+
+draws = fit$draws(c("beta[1]", "beta[2]", "tauy"))
+mcmc_trace(draws) # Graphiques standards des traces des tirages MCMC
+mcmc_acf(draws) 
+# Grille de graphiques d’autocorrélation par chaîne et paramètre
+
+# Densités a posteriori
+mcmc_areas(draws[,,1], prob = 0.975)
+mcmc_areas(draws[,,2], prob = 0.975)
+mcmc_areas(draws[,,3], prob = 0.975)
+```
+
+**↓ Light uncertainty**
+
+```{r}
+# cmdstanr
+
+# Light_Model = cmdstan_model("Light_Model.stan")
+# Light_fit = Light_Model$sample(data = Light_data, adapt_delta = 0.99,
+#                                max_treedepth = 14, iter_warmup = 5000,
+#                                iter_sampling = 25000, chains = 4,
+#                                parallel_chains = 4, seed = 30,
+#                                refresh = 3000)
+# Light_fit$save_object("Light_fit.rds")
+
+Light_fit = readRDS("Light_fit.rds")
+```
+
+## 4. Echantillons
+
+```{r}
+sample = fit$draws(format = "matrix")
+
+x_seq = seq(min(data$x), max(data$x), length.out = 100)
+x_pred = cbind(1, x_seq)
+beta = cbind(sample[, "beta[1]"], sample[, "beta[2]"])
+y_pred_samples = beta %*% t(x_pred)
+
+# Droite de régression avec intervalle de confiance à 95%
+y_mean = apply(y_pred_samples, 2, mean)
+y_lower = apply(y_pred_samples, 2, quantile, 0.025)
+y_upper = apply(y_pred_samples, 2, quantile, 0.975)
+
+# Points estimés
+xi = colMeans(sample[, paste0("xi[", 1:data$n, "]")])
+eta = colMeans(sample[, paste0("eta[", 1:data$n, "]")])
+
+plot_data = data.frame(x_seq, y_mean, y_lower, y_upper)
+points_data = data.frame(y = data$y, x = data$x, uy = 5*data$uy,
+                         ux = 5*data$ux, xi = xi, eta = eta,
+                         labels = c("NMIJ", "NPL", "BAM", "NMIA", "NIST",
+                                    "NMISA", "CENAM", "LNE", "KRISS",
+                                    "VNIIM", "VSL"))
+```
+
+**↓ Light uncertainty**
+
+```{r}
+sample = Light_fit$draws(format = "matrix")
+
+x_seq = seq(min(data$x), max(data$x), length.out = 100)
+x_pred = cbind(1, x_seq)
+beta = cbind(sample[, "beta[1]"], sample[, "beta[2]"])
+y_pred_samples = beta %*% t(x_pred)
+
+y_mean = apply(y_pred_samples, 2, mean)
+y_lower = apply(y_pred_samples, 2, quantile, 0.025)
+y_upper = apply(y_pred_samples, 2, quantile, 0.975)
+
+xi = colMeans(sample[, paste0("xi[", 1:data$n, "]")])
+eta = colMeans(sample[, paste0("eta[", 1:data$n, "]")])
+
+plot_data_Light = data.frame(x_seq, y_mean, y_lower, y_upper)
+points_data_Light = data.frame(y = Light_data$y, x = Light_data$x,
+                               uy = 5*Light_data$uy,
+                               ux = 5*Light_data$ux, xi = xi, eta = eta,
+                               labels = c("NMIJ", "NPL", "BAM", "NMIA",
+                                          "NIST", "NMISA", "CENAM",
+                                          "LNE", "KRISS", "VNIIM",
+                                          "VSL"))
+```
+
+## 5. Visualisation
+
+```{r}
+# plotly
+fig <- plot_ly() %>%
+  
+  # ↓ bande de couverture
+  add_ribbons(data = plot_data, x = ~x_seq, ymin = ~y_lower,
+              ymax = ~y_upper, line = list(color = "transparent"),
+              fillcolor = "#FFD700", hoverinfo = "skip",
+              showlegend = FALSE) %>%
+  
+  # ↓ light coverage band
+  add_ribbons(data = plot_data_Light, x = ~x_seq, ymin = ~y_lower,
+              ymax = ~y_upper, line = list(color = "transparent"),
+              fillcolor = "#CC79A7", hoverinfo = "skip",
+              showlegend = FALSE) %>%
+  
+  # ↓ droite de régression
+  add_trace(data = plot_data, x = ~x_seq, y = ~y_mean, type = "scatter",
+            mode = "lines", line = list(color = "#0072B2", width = 1),
+            hoverinfo="skip", showlegend = FALSE) %>%
+  
+  # ↓ light regression line
+  add_trace(data = plot_data_Light, x = ~x_seq, y = ~y_mean,
+            type = "scatter", mode = "lines",
+            line = list(color = "#E69F00", width = 1), hoverinfo="skip",
+            showlegend = FALSE) %>%
+  
+  # ↓ incertitude
+  add_trace(data = points_data, x = ~x, y = ~y, type = "scatter",
+            mode = "markers", error_x = list(array = ~ux, visible = TRUE,
+                                             color = "#4D4D4D",
+                                             thickness = 1, width = 0),
+            error_y = list(array = ~uy, visible = TRUE,
+                           color = "#4D4D4D", thickness = 1, width = 0),
+            marker = list(color = "transparent"), hoverinfo = "skip",
+            showlegend = FALSE) %>%
+  
+  # ↓ points observés
+  add_trace(data = points_data, x = ~x, y = ~y, type = "scatter",
+            mode = "markers", marker = list(color = "#4D4D4D",
+                                            symbol = "diamond",
+                                            size = 6), text = ~labels,
+            hoverinfo = "text", showlegend = FALSE) %>%
+  
+  # ↓ points projetés
+  add_trace(data = points_data, x = ~xi, y = ~eta, type = "scatter",
+            mode = "markers", marker = list(color = "#D72638", size = 6,
+                                            symbol = "circle"),
+            hoverinfo = "skip", showlegend = FALSE) %>%
+  
+  # ↓ résidu horizontal
+  add_segments(data = points_data, x = ~x, y = ~y, xend = ~xi, yend = ~y,
+               line = list(color = "#D72638", width = 1),
+               hoverinfo = "skip", showlegend = FALSE) %>%
+  
+  # ↓ vertical residual
+  add_segments(data = points_data, x = ~xi, xend = ~xi, y = ~y,
+               yend = ~eta, line = list(color = "#D72638", width = 1),
+               text = ~round(y-eta,2), hoverinfo = "text",
+               showlegend = FALSE) %>%
+  # la valeur est affichée lorsqu’on survole l’intersection avec le
+  # résidu horizontal
+  
+  # ↓ light projected points
+  add_trace(data = points_data_Light, x = ~xi, y = ~eta,
+            type = "scatter", mode = "markers",
+            marker = list(color = "#009E73", size = 6, 
+                          symbol = "circle"),
+            hoverinfo = "skip", showlegend = FALSE) %>%
+  
+  # ↓ light horizontal residual
+  add_segments(data = points_data_Light, x = ~x, y = ~eta, xend = ~xi,
+               yend = ~eta, line = list(color = "#009E73", width = 1),
+               hoverinfo = "skip", showlegend = FALSE) %>%
+  
+  # ↓ light vertical residual
+  add_segments(data = points_data_Light, x = ~x, xend = ~x, y = ~y,
+               yend = ~eta, line = list(color = "#009E73", width = 1),
+               text = ~round(y-eta,2), hoverinfo = "text",
+               showlegend = FALSE) %>%                     
+  # la valeur est affichée lorsqu’on survole l’intersection avec le
+  # résidu horizontal
+  
+  # ↓ menu déroulant
+  layout(xaxis = list(title = "x"), yaxis = list(title = ""),
+         annotations = list(text = "y", x = -0.05, y = 0.55,
+                            xref = "paper", yref = "paper",
+                            showarrow = FALSE, textangle = 0,
+                            font =list(size = 14)),
+         updatemenus = list(list(type = "dropdown", direction = "down",
+                                 x = 0.1, y = 1.1, buttons = list(
+    list(label = "Tout", method = "restyle",
+         args = list("visible", TRUE)), 
+    list(label = "Dark uncertainty", method = "restyle",
+         args = list("visible", list(TRUE, FALSE, TRUE, FALSE, TRUE,
+                                     TRUE, FALSE, FALSE, FALSE, FALSE,
+                                     FALSE, FALSE))),
+    list(label = "Light uncertainty", method = "restyle",
+         args = list("visible", list(FALSE, TRUE, FALSE, TRUE, TRUE,
+                                     TRUE, FALSE, FALSE, FALSE, FALSE,
+                                     FALSE, FALSE))),
+    list(label = "Dark estimates", method = "restyle",
+         args = list("visible", list(FALSE, FALSE, TRUE, FALSE, FALSE,
+                                     TRUE, TRUE, TRUE, TRUE, FALSE,
+                                     FALSE, FALSE))),
+    list(label = "Light estimates", method = "restyle",
+         args = list("visible", list(FALSE, FALSE, FALSE, TRUE, FALSE,
+                                     TRUE, FALSE, FALSE, FALSE, TRUE,
+                                     TRUE, TRUE))))
+    )))
+
+fig
+```
+
+## 6. Analyse de sensibilité à l'a priori
+
+**A priori de référence :**
+
+-   $\beta_M = (6.07,\ 94.26)$
+-   $\beta_S = (6.39,\ 9.43)$
+-   $\gamma_y = 0.048$
+$$
+\begin{aligned}
+\xi_M = (&0.983020,\ 0.986981,\ 0.986377,\ 1.000875,\ 0.998881,\ 1.005079,\ 1.006298 \\
+        &1.004614,\ 1.006739,\ 1.009951,\ 1.007570)
+\end{aligned}
+$$
+$$
+\begin{aligned}
+\xi_S = (&0.0018,\ 0.0018,\ 0.0018,\ 0.0018,\ 0.0018,\ 0.0018,\ 0.0018, 0.0018,\ 0.0018 \\ 
+        &0.0018,\ 0.0018)
+\end{aligned}
+$$
+
+```{r, message=FALSE}
+# Valeurs test de gammay : 0.038, 0.047, 0.049, 0.058, 0.148, 1.048,
+#                          10.048
+
+summary_reference = fit$summary(variables = "tauy",
+                                ~quantile(.x, probs = c(0.025, 0.975)),
+                                "mean", "median", "sd", "mad")
+
+Model = cmdstan_model("Model.stan")
+
+# Test 1
+data_t1 = list(n = length(y), y = y, uy = uy, x = x, ux = ux,
+               betaM = beta.pi.mean, betaS = beta.pi.sd, xiM = x,
+               xiS = 3*ux, gammay = 0.038)
+fit_t1 = Model$sample(data = data_t1, adapt_delta = 0.99,
+                      max_treedepth = 14, iter_warmup = 500,
+                      iter_sampling = 2500, chains = 4, 
+                      parallel_chains = 4, seed = 30)
+summary_t1 = fit_t1$summary(variables = "tauy",
+                            ~quantile(.x, probs = c(0.025, 0.975)),
+                            "mean", "median", "sd", "mad")
+
+# Test 2
+data_t2 = list(n = length(y), y = y, uy = uy, x = x, ux = ux,
+               betaM = beta.pi.mean, betaS = beta.pi.sd, xiM = x, 
+               xiS = 3*ux, gammay = 0.047)
+fit_t2 = Model$sample(data = data_t2, adapt_delta = 0.99,
+                      max_treedepth = 14, iter_warmup = 500,
+                      iter_sampling = 2500, chains = 4,
+                      parallel_chains = 4, seed = 30)
+summary_t2 = fit_t2$summary(variables = "tauy",
+                            ~quantile(.x, probs = c(0.025, 0.975)),
+                            "mean", "median", "sd", "mad")
+
+# Test 3
+data_t3 = list(n = length(y), y = y, uy = uy, x = x, ux = ux,
+               betaM = beta.pi.mean, betaS = beta.pi.sd, xiM = x,
+               xiS = 3*ux, gammay = 0.049)
+fit_t3 = Model$sample(data = data_t3, adapt_delta = 0.99,
+                      max_treedepth = 14, iter_warmup = 500,
+                      iter_sampling = 2500, chains = 4,
+                      parallel_chains = 4, seed = 30)
+summary_t3 = fit_t3$summary(variables = "tauy",
+                            ~quantile(.x, probs = c(0.025, 0.975)),
+                            "mean", "median", "sd", "mad")
+
+# Test 4
+data_t4 = list(n = length(y), y = y, uy = uy, x = x, ux = ux,
+               betaM = beta.pi.mean, betaS = beta.pi.sd, xiM = x,
+               xiS = 3*ux, gammay = 0.058)
+fit_t4 = Model$sample(data = data_t4, adapt_delta = 0.99,
+                      max_treedepth = 14, iter_warmup = 500,
+                      iter_sampling = 2500, chains = 4,
+                      parallel_chains = 4, seed = 30)
+summary_t4 = fit_t4$summary(variables = "tauy",
+                            ~quantile(.x, probs = c(0.025, 0.975)),
+                            "mean", "median", "sd", "mad")
+
+# Test 5
+data_t5 = list(n = length(y), y = y, uy = uy, x = x, ux = ux,
+               betaM = beta.pi.mean, betaS = beta.pi.sd, xiM = x,
+               xiS = 3*ux, gammay = 0.148)
+fit_t5 = Model$sample(data = data_t5, adapt_delta = 0.99,
+                      max_treedepth = 14, iter_warmup = 500,
+                      iter_sampling = 2500, chains = 4,
+                      parallel_chains = 4, seed = 30)
+summary_t5 = fit_t5$summary(variables = "tauy",
+                            ~quantile(.x, probs = c(0.025, 0.975)), 
+                            "mean", "median", "sd", "mad")
+
+# Test 6
+data_t6 = list(n = length(y), y = y, uy = uy, x = x, ux = ux,
+               betaM = beta.pi.mean, betaS = beta.pi.sd, xiM = x,
+               xiS = 3*ux, gammay = 1.048)
+fit_t6 = Model$sample(data = data_t6, adapt_delta = 0.99,
+                      max_treedepth = 14, iter_warmup = 500,
+                      iter_sampling = 2500, chains = 4,
+                      parallel_chains = 4, seed = 30)
+summary_t6 = fit_t6$summary(variables = "tauy",
+                            ~quantile(.x, probs = c(0.025, 0.975)),
+                            "mean", "median", "sd", "mad")
+
+# Test 7
+data_t7 = list(n = length(y), y = y, uy = uy, x = x, ux = ux,
+               betaM = beta.pi.mean, betaS = beta.pi.sd, xiM = x,
+               xiS = 3*ux, gammay = 10.048)
+fit_t7 = Model$sample(data = data_t7, adapt_delta = 0.99,
+                      max_treedepth = 14, iter_warmup = 500, 
+                      iter_sampling = 2500, chains = 4,
+                      parallel_chains = 4, seed = 30)
+summary_t7 = fit_t7$summary(variables = "tauy",
+                            ~quantile(.x, probs = c(0.025, 0.975)),
+                            "mean", "median", "sd", "mad")
+
+# Résumé du test
+gammay = c(0.038, 0.047, 0.048, 0.049, 0.058, 0.148, 1.048, 10.048)
+summary = cbind(gammay, rbind(summary_t1, summary_t2, summary_reference,
+                              summary_t3, summary_t4, summary_t5,
+                              summary_t6, summary_t7))
+summary$variable =  NULL
+rownames(summary) = c(1, 2, "reference", 3, 4, 5, 6, 7)
+format(summary, digits = 3)
+```
+
+# II. Valeurs isotopiques δ
+
+## 0. Modèle
+
+**Variables observées :**
+
+-   ( $x$ ): Valeurs calibrées, avec incertitude ( $u_x$ ) et degrés de liberté ( $\nu_x$ )\
+-   ( $y$ ): Valeurs mesurées, avec incertitude ( $u_y$ ) et degrés de liberté ( $\nu_y$ )
+
+**Variables latentes et paramètres :**
+
+-   ( $\eta$ ): Valeurs vraies de ( $y$ )\
+-   ( $\xi$ ): Valeurs attendues de ( $x$ ), avec la régression\
+-   ( $\tau_x$, $\tau_y$ ): dark uncertainties pour ( $x$ ) et ( $y$ )\
+-   ( $\sigma^2_x$, $\sigma^2_y$ ): variances instrumentales inconnues de ( $x$ ) et ( $y$ )
+
+**Structure du modèle :**
+
+$$
+\begin{aligned}
+\eta &\sim \mathcal{N}(\eta_M,\ \eta_S^2) \\
+\xi &= \beta_1 + \beta_2 \eta \\
+x &\sim \mathcal{N}(\xi,\ \sigma^2_x + \tau_x^2) \\
+y &\sim \mathcal{N}(\eta,\ \sigma^2_y + \tau_y^2) \\
+u_x^2 &\sim \text{Gamma}\left(\frac{\nu_x}{2},\ \frac{\nu_x}{2 \sigma^2_x} \right) \\
+u_y^2 &\sim \text{Gamma}\left(\frac{\nu_y}{2},\ \frac{\nu_y}{2 \sigma^2_y} \right)
+\end{aligned}
+$$
+
+**A priori :**
+
+$$
+\begin{aligned}
+\beta &\sim \mathcal{N}(\beta_M,\ \beta_S^2) \\
+\tau_x &\sim \text{Half-Cauchy}(0, \gamma_x) \\
+\tau_y &\sim \text{Half-Cauchy}(0, \gamma_y) \\
+\sigma^2_x &\sim \text{Half-Cauchy}(0, \alpha_x^2) \\
+\sigma^2_y &\sim \text{Half-Cauchy}(0, \alpha_y^2)
+\end{aligned}
+$$
+
+## 1. Données
+
+```{r Table 2}
+# Substances : Etio, A, 11oxoEtio, T1, 11OHEtio, 16en, DHEA, T2
+
+x = c(-27.94, -27.79, -13.58, -27.87, -29.51, -30.96, -31.63, -22.52)
+ux = c(0.120, 0.105, 0.115, 0.120, 0.180, 0.185, 0.270, 0.165)
+nux = c(41, 15, 28, 24, 58, 47, 40, 54)
+
+y = c(-27.604, -27.161, -13.717, -28.070, -29.584, -31.411, -31.454,
+      -21.972)
+uy = c(0.051, 0.032, 0.046, 0.050, 0.045, 0.060, 0.051, 0.044)
+nuy = c(18, 18, 18, 18, 18, 9, 9, 9)
+```
+
+## 2. Paramètres
+
+```{r}
+beta.pi.mean = c(0, 1)
+beta.pi.sd = c(10, 0.5)
+
+data2 = list(n = length(x), x = x, ux = ux, y = y, uy = uy, nux = nux,
+             nuy = nuy, betaM = beta.pi.mean, betaS = beta.pi.sd,
+             etaM = y, etaS = 3 * uy, alphax2 = median(ux^2),
+             alphay2 = median(uy^2),
+             gammax = median(abs(residuals(lm(x~y)))),
+             gammay = median(abs(residuals(lm(y~x)))))
+
+# ----- ↓ light uncertainty -----
+
+Light_data2 = list(n = length(x), x = x, ux = ux, y = y, uy = uy,
+                   nux = nux, nuy = nuy, betaM = beta.pi.mean,
+                   betaS = beta.pi.sd, etaM = y, etaS = 3 * uy,
+                   alphax2 = median(ux^2), alphay2 = median(uy^2))
+```
+
+## 3. Ajustement du modèle
+
+```{r A4}
+# cmdstanr
+
+# ↓ mis en commentaire car les échantillons ont déjà été sauvegardés
+
+# Model2 = cmdstan_model("Model2.stan")
+# fit2 = Model2$sample(data = data2, adapt_delta = 0.975,
+#                      iter_warmup = 20000, iter_sampling = 40000,
+#                      chains = 4, parallel_chains = 4, seed = 23,
+#                      refresh = 6000)
+# fit2$save_object("fit2.rds")
+
+fit2= readRDS("fit2.rds")
+
+# diagnostics MCMC
+summary_df = as.data.frame(fit2$summary())
+format(summary_df, digits = 3)
+
+draws = fit2$draws(c("beta[1]", "beta[2]", "taux", "tauy"))
+mcmc_trace(draws)
+mcmc_acf(draws)
+
+# Densités a posteriori
+mcmc_areas(draws[,,1], prob = 0.975)
+mcmc_areas(draws[,,2], prob = 0.975)
+mcmc_areas(draws[,,3], prob = 0.975)
+mcmc_areas(draws[,,4], prob = 0.975)
+```
+
+**↓ Light uncertainty**
+
+```{r}
+# cmdstanr
+
+# Light_Model2 = cmdstan_model("Light_Model2.stan")
+# Light_fit2 = Light_Model2$sample(data = Light_data2,
+#                                  adapt_delta = 0.975,
+#                                  iter_warmup = 20000,
+#                                  iter_sampling = 40000, chains = 4,
+#                                  parallel_chains = 4, seed = 30,
+#                                  refresh = 6000)
+# Light_fit2$save_object("Light_fit2.rds")
+
+Light_fit2 = readRDS("Light_fit2.rds")
+```
+
+## 4. Echantillons
+
+```{r}
+sample = fit2$draws(format = "matrix")
+
+x_seq = seq(min(data2$x), max(data2$x), length.out = 100)
+x_pred = cbind(1, x_seq)
+beta = cbind(sample[, "beta[1]"], sample[, "beta[2]"])
+y_pred_samples = beta %*% t(x_pred)
+
+# Droite de régression avec intervalle de confiance à 95%
+y_mean = apply(y_pred_samples, 2, mean)
+y_lower = apply(y_pred_samples, 2, quantile, 0.025)
+y_upper = apply(y_pred_samples, 2, quantile, 0.975)
+
+# Points estimés
+xi = colMeans(sample[, paste0("xi[", 1:data2$n, "]")])
+eta = colMeans(sample[, paste0("eta[", 1:data2$n, "]")])
+
+plot_data = data.frame(x_seq, y_mean, y_lower, y_upper)
+points_data = data.frame(y = data2$y, x = data2$x, uy = 5*data2$uy,
+                         ux = 5*data2$ux, xi = xi, eta = eta,
+                         labels = c("Etio", "A", "11oxoEtio", "T1",
+                                    "11OHEtio", "16en", "DHEA", "T2"))
+```
+
+**↓ Light uncertainty**
+
+```{r}
+sample = Light_fit2$draws(format = "matrix")
+
+x_seq = seq(min(Light_data2$x), max(Light_data2$x), length.out = 100)
+x_pred = cbind(1, x_seq)
+beta = cbind(sample[, "beta[1]"], sample[, "beta[2]"])
+y_pred_samples = beta %*% t(x_pred)
+
+y_mean = apply(y_pred_samples, 2, mean)
+y_lower = apply(y_pred_samples, 2, quantile, 0.025)
+y_upper = apply(y_pred_samples, 2, quantile, 0.975)
+
+xi = colMeans(sample[, paste0("xi[", 1:Light_data2$n, "]")])
+eta = colMeans(sample[, paste0("eta[", 1:Light_data2$n, "]")])
+
+plot_data_Light = data.frame(x_seq, y_mean, y_lower, y_upper)
+points_data_Light = data.frame(y = Light_data2$y, x = Light_data2$x,
+                               uy = 5*Light_data2$uy,
+                               ux = 5*Light_data2$ux, xi = xi, eta = eta,
+                               labels = c("Etio", "A", "11oxoEtio", "T1",
+                                          "11OHEtio", "16en", "DHEA",
+                                          "T2"))
+```
+
+## 5. Visualisation
+
+```{r}
+# plotly
+fig <- plot_ly() %>%
+  
+  # ↓ bande de couverture
+  add_ribbons(data = plot_data, x = ~x_seq, ymin = ~y_lower,
+              ymax = ~y_upper, line = list(color = "transparent"),
+              fillcolor = "#FFD700", hoverinfo = "skip",
+              showlegend = FALSE) %>%
+  
+  # ↓ light coverage band
+  add_ribbons(data = plot_data_Light, x = ~x_seq, ymin = ~y_lower,
+              ymax = ~y_upper, line = list(color = "transparent"),
+              fillcolor = "#CC79A7", hoverinfo = "skip",
+              showlegend = FALSE) %>%
+  
+  # ↓ droite de régression
+  add_trace(data = plot_data, x = ~x_seq, y = ~y_mean, type = "scatter",
+            mode = "lines", line = list(color = "#0072B2", width = 1),
+            hoverinfo="skip", showlegend = FALSE) %>%
+  
+  # ↓ light regression line
+  add_trace(data = plot_data_Light, x = ~x_seq, y = ~y_mean,
+            type = "scatter", mode = "lines",
+            line = list(color = "#E69F00", width = 1),hoverinfo="skip",
+            showlegend = FALSE) %>%
+  
+  # ↓ incertitude
+  add_trace(data = points_data, x = ~x, y = ~y, type = "scatter",
+            mode = "markers",
+            error_x = list(array = ~ux, visible = TRUE, 
+                           color = "#0072B2", thickness = 1, width = 0),
+            error_y = list(array = ~uy, visible = TRUE,
+                           color = "#0072B2", thickness = 1, width = 0),
+            marker = list(color = "transparent"), hoverinfo = "skip",
+            showlegend = FALSE) %>%
+  
+  # ↓ points observés
+  add_trace(data = points_data, x = ~x, y = ~y, type = "scatter",
+            mode = "markers", marker = list(color = "#0072B2",
+                                            symbol = "diamond",
+                                            size = 6),
+            text = ~labels, hoverinfo = "text", showlegend = FALSE) %>%
+  
+  # ↓ points projetés
+  add_trace(data = points_data, x = ~eta, y = ~xi, type = "scatter",
+            mode = "markers", marker = list(color = "#D72638", size = 6,
+                                            symbol = "circle"),
+            hoverinfo = "skip", showlegend = FALSE) %>%
+  
+  # ↓ résidu horizontal
+  add_segments(data = points_data, x = ~x, y = ~y, xend = ~eta,
+               yend = ~y, line = list(color = "#D72638", width = 1),
+               hoverinfo = "skip", showlegend = FALSE) %>%
+  
+  # ↓ résidu vertical
+  add_segments(data = points_data, x = ~eta, xend = ~eta, y = ~y,
+               yend = ~xi, line = list(color = "#D72638", width = 1),
+               text = ~round(y-xi,2), hoverinfo = "text",
+               showlegend = FALSE) %>%                                     
+  # la valeur est affichée lorsqu’on survole l’intersection avec le
+  # résidu horizontal
+  
+  # ↓ light projected points
+  add_trace(data = points_data_Light, x = ~eta, y = ~xi,
+            type = "scatter", mode = "markers",
+            marker = list(color = "#009E73", size = 6,
+                                            symbol = "circle"),
+            hoverinfo = "skip", showlegend = FALSE) %>%
+  
+  # ↓ light horizontal residual
+  add_segments(data = points_data_Light, x = ~x, y = ~xi, xend = ~eta,
+               yend = ~xi, line = list(color = "#009E73", width = 1),
+               hoverinfo = "skip", showlegend = FALSE) %>%
+  
+  # ↓ light vertical residual
+  add_segments(data = points_data_Light, x = ~x, xend = ~x, y = ~y,
+               yend = ~xi, line = list(color = "#009E73", width = 1),
+               text = ~round(y-xi,2), hoverinfo = "text",
+               showlegend = FALSE) %>%
+  # la valeur est affichée lorsqu’on survole l’intersection avec le 
+  # résidu horizontal
+  
+  # ↓ menu déroulant
+  layout(xaxis = list(title = "x"), yaxis = list(title = ""),
+         annotations = list(text = "y", x = -0.05, y = 0.55, 
+                            xref = "paper", yref = "paper",
+                            showarrow = FALSE, textangle = 0,
+                            font = list(size = 14)),
+         updatemenus = list(list(type = "dropdown", direction = "down",
+                                 x = 0.1, y = 1.1, buttons = list(
+    list(label = "Tout", method = "restyle",
+         args = list("visible", TRUE)), 
+    list(label = "Dark uncertainty", method = "restyle",
+         args = list("visible", list(TRUE, FALSE, TRUE, FALSE, TRUE,
+                                     TRUE, FALSE, FALSE, FALSE, FALSE,
+                                     FALSE, FALSE))),
+    list(label = "Light uncertainty", method = "restyle",
+         args = list("visible", list(FALSE, TRUE, FALSE, TRUE, TRUE,
+                                     TRUE, FALSE, FALSE, FALSE, FALSE,
+                                     FALSE, FALSE))),
+    list(label = "Dark estimates", method = "restyle",
+         args = list("visible", list(FALSE, FALSE, TRUE, FALSE, FALSE,
+                                     TRUE, TRUE, TRUE, TRUE, FALSE,
+                                     FALSE, FALSE))),
+    list(label = "Light estimates", method = "restyle",
+         args = list("visible", list(FALSE, FALSE, FALSE, TRUE, FALSE,
+                                     TRUE, FALSE, FALSE, FALSE, TRUE,
+                                     TRUE, TRUE))))
+    )))
+
+fig
+```
+
+## 6. Analyse de sensibilité à l'a priori
+
+**A priori de référence :**
+
+-   $\beta_M = (0,\ 1)$
+-   $\beta_S = (10.0,\ 0.5)$
+-   $\gamma_x = 0.3102195$
+-   $\gamma_y = 0.2884043$
+-   $\eta_M = (-27.604,\ -27.161,\ -13.717,\ -28.070,\ -29.584,\ -31.411, \ -31.454,\ -21.972)$
+-   $\eta_S = (0.153,\ 0.096,\ 0.138,\ 0.150,\ 0.135,\ 0.180,\ 0.153,\ 0.132)$
+-   $\alpha_x^2 = 0.0208125$
+-   $\alpha_y^2 = 0.002308$
+
+```{r}
+# Valeurs de test de (gammax ↗, gammay ↗) :
+# (0.003102195, 0.002884043), (0.03102195, 0.02884043),
+# (3.102195, 2.884043), (31.02195, 28.84043)
+# Valeurs de test de (gammax ↗, gammay ↘) : 
+# (0.003102195, 28.84043), (0.03102195, 2.884043),
+# (3.102195, 0.02884043), (31.02195, 0.002884043)                       
+
+summary_reference = fit2$summary(variables = c("taux", "tauy"),
+                                 ~quantile(.x, probs = c(0.025, 0.975)),
+                                 "mean", "median", "sd", "mad")
+
+Model2 = cmdstan_model("Model2.stan")
+
+# Test 1
+data_t1 = list(n = length(x), x = x, ux = ux, y = y, uy = uy, nux = nux,
+               nuy = nuy, betaM = beta.pi.mean, betaS = beta.pi.sd,
+               etaM = y, etaS = 3 * uy, alphax2 = median(ux^2), 
+               alphay2 = median(uy^2), gammax = 0.003102195,
+               gammay = 0.002884043)
+fit_t1 = Model2$sample(data = data_t1, adapt_delta = 0.99,
+                       iter_warmup = 2000, iter_sampling = 4000,
+                       chains = 4, parallel_chains = 4, seed = 30)
+summary_t1 = fit_t1$summary(variables = c("taux", "tauy"),
+                            ~quantile(.x, probs = c(0.025, 0.975)),
+                            "mean", "median", "sd", "mad")
+
+# Test 2
+data_t2 = list(n = length(x), x = x, ux = ux, y = y, uy = uy, nux = nux,
+               nuy = nuy, betaM = beta.pi.mean, betaS = beta.pi.sd,
+               etaM = y, etaS = 3 * uy, alphax2 = median(ux^2),
+               alphay2 = median(uy^2), gammax = 0.03102195,
+               gammay = 0.02884043)
+fit_t2 = Model2$sample(data = data_t2, adapt_delta = 0.99,
+                       iter_warmup = 2000, iter_sampling = 4000,
+                       chains = 4, parallel_chains = 4, seed = 30)
+summary_t2 = fit_t2$summary(variables = c("taux", "tauy"),
+                            ~quantile(.x, probs = c(0.025, 0.975)),
+                            "mean", "median", "sd", "mad")
+
+# Test 3
+data_t3 = list(n = length(x), x = x, ux = ux, y = y, uy = uy, nux = nux,
+               nuy = nuy, betaM = beta.pi.mean, betaS = beta.pi.sd,
+               etaM = y, etaS = 3 * uy, alphax2 = median(ux^2),
+               alphay2 = median(uy^2), gammax = 3.102195,
+               gammay = 2.884043)
+fit_t3 = Model2$sample(data = data_t3, adapt_delta = 0.99,
+                       iter_warmup = 2000, iter_sampling = 4000,
+                       chains = 4, parallel_chains = 4,
+                       seed = 30)
+summary_t3 = fit_t3$summary(variables = c("taux", "tauy"),
+                            ~quantile(.x, probs = c(0.025, 0.975)),
+                            "mean", "median", "sd", "mad")
+
+# Test 4
+data_t4 = list(n = length(x), x = x, ux = ux, y = y, uy = uy, nux = nux,
+               nuy = nuy, betaM = beta.pi.mean, betaS = beta.pi.sd,
+               etaM = y, etaS = 3 * uy, alphax2 = median(ux^2),
+               alphay2 = median(uy^2), gammax = 31.02195,
+               gammay = 28.84043)
+fit_t4 = Model2$sample(data = data_t4, adapt_delta = 0.99,
+                       iter_warmup = 20000, iter_sampling = 40000,
+                       chains = 4, parallel_chains = 4, seed = 30)
+summary_t4 = fit_t4$summary(variables = c("taux", "tauy"),
+                            ~quantile(.x, probs = c(0.025, 0.975)),
+                            "mean", "median", "sd", "mad")
+
+# Test 5
+data_t5 = list(n = length(x), x = x, ux = ux, y = y, uy = uy, nux = nux,
+               nuy = nuy, betaM = beta.pi.mean, betaS = beta.pi.sd,
+               etaM = y, etaS = 3 * uy, alphax2 = median(ux^2),
+               alphay2 = median(uy^2), gammax = 0.003102195,
+               gammay = 28.84043)
+fit_t5 = Model2$sample(data = data_t5, adapt_delta = 0.99,
+                       iter_warmup = 2000, iter_sampling = 4000,
+                       chains = 4, parallel_chains = 4, seed = 30,
+                       refresh = 12000)
+summary_t5 = fit_t5$summary(variables = c("taux", "tauy"),
+                            ~quantile(.x, probs = c(0.025, 0.975)), 
+                            "mean", "median", "sd", "mad")
+
+# Test 6
+data_t6 = list(n = length(x), x = x, ux = ux, y = y, uy = uy, nux = nux,
+               nuy = nuy, betaM = beta.pi.mean, betaS = beta.pi.sd,
+               etaM = y,     etaS = 3 * uy, alphax2 = median(ux^2),
+               alphay2 = median(uy^2), gammax = 0.03102195,
+               gammay = 2.884043)
+fit_t6 = Model2$sample(data = data_t6, adapt_delta = 0.99,
+                       iter_warmup = 2000, iter_sampling = 4000,
+                       chains = 4, parallel_chains = 4, seed = 30)
+summary_t6 = fit_t6$summary(variables = c("taux", "tauy"),
+                            ~quantile(.x, probs = c(0.025, 0.975)),
+                            "mean", "median", "sd", "mad")
+
+# Test 7
+data_t7 = list(n = length(x), x = x, ux = ux, y = y, uy = uy, nux = nux,
+               nuy = nuy, betaM = beta.pi.mean, betaS = beta.pi.sd,
+               etaM = y, etaS = 3 * uy, alphax2 = median(ux^2),
+               alphay2 = median(uy^2), gammax = 3.102195,
+               gammay = 0.02884043)
+fit_t7 = Model2$sample(data = data_t7, adapt_delta = 0.99,
+                       iter_warmup = 2000, iter_sampling = 4000,
+                       chains = 4, parallel_chains = 4, seed = 30)
+summary_t7 = fit_t7$summary(variables = c("taux", "tauy"),
+                            ~quantile(.x, probs = c(0.025, 0.975)),
+                            "mean", "median", "sd", "mad")
+
+# Test 8
+data_t8 = list(n = length(x), x = x, ux = ux, y = y, uy = uy, nux = nux,
+               nuy = nuy, betaM = beta.pi.mean, betaS = beta.pi.sd,
+               etaM = y, etaS = 3 * uy, alphax2 = median(ux^2),
+               alphay2 = median(uy^2), gammax = 31.02195,
+               gammay = 0.002884043)
+fit_t8 = Model2$sample(data = data_t8, adapt_delta = 0.99,
+                       iter_warmup = 2000, iter_sampling = 4000,
+                       chains = 4, parallel_chains = 4, seed = 30)
+summary_t8 = fit_t8$summary(variables = c("taux", "tauy"),
+                            ~quantile(.x, probs = c(0.025, 0.975)),
+                            "mean", "median", "sd", "mad")
+
+# Résumé du test
+gamma = c(0.3102195000, 0.28840430, 0.003102195, 0.002884043,
+          0.031021950, 0.028840430, 3.102195000, 2.884043000,
+          31.021950000, 28.840430000, 0.003102195, 28.840430000,
+          0.031021950, 2.884043000, 3.102195000, 0.028840430,
+          31.021950000, 0.002884043)
+summary = cbind(gamma, rbind(summary_reference, summary_t1, summary_t2,
+                             summary_t3, summary_t4, summary_t5,
+                             summary_t6, summary_t7, summary_t8))
+rownames(summary) = NULL
+format(summary, digits = 3)
+```
